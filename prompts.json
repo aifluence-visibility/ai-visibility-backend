@@ -1,0 +1,302 @@
+[
+  {
+    "category": "generic",
+    "subcategory": "market_overview",
+    "prompt": "What are the best options for payment processing?",
+    "description": "Generic market inquiry"
+  },
+  {
+    "category": "generic",
+    "subcategory": "market_overview",
+    "prompt": "Which fintech platforms are most popular right now?",
+    "description": "General fintech question"
+  },
+  {
+    "category": "generic",
+    "subcategory": "market_overview",
+    "prompt": "What are the leading cloud infrastructure providers?",
+    "description": "Cloud market overview"
+  },
+  {
+    "category": "generic",
+    "subcategory": "market_overview",
+    "prompt": "Name the top SaaS platforms for business management",
+    "description": "SaaS market inquiry"
+  },
+  {
+    "category": "generic",
+    "subcategory": "product_type",
+    "prompt": "What payment solutions exist for e-commerce?",
+    "description": "E-commerce payment options"
+  },
+  {
+    "category": "generic",
+    "subcategory": "product_type",
+    "prompt": "List popular billing and invoicing tools",
+    "description": "Billing solutions"
+  },
+  {
+    "category": "generic",
+    "subcategory": "product_type",
+    "prompt": "What are the main alternatives for digital wallets?",
+    "description": "Digital wallet options"
+  },
+  {
+    "category": "generic",
+    "subcategory": "product_type",
+    "prompt": "Which platforms offer API-first payment infrastructure?",
+    "description": "API-based payments"
+  },
+  {
+    "category": "generic",
+    "subcategory": "use_case",
+    "prompt": "What payment processor should I use for my startup?",
+    "description": "Startup payment solutions"
+  },
+  {
+    "category": "generic",
+    "subcategory": "use_case",
+    "prompt": "Best payment methods for international transactions?",
+    "description": "Global payments"
+  },
+  {
+    "category": "generic",
+    "subcategory": "use_case",
+    "prompt": "Top platforms for subscription billing",
+    "description": "Subscription management"
+  },
+  {
+    "category": "generic",
+    "subcategory": "use_case",
+    "prompt": "What tools handle recurring payments effectively?",
+    "description": "Recurring payment systems"
+  },
+  {
+    "category": "niche",
+    "subcategory": "vertical",
+    "prompt": "Best payment solutions for SaaS companies specifically",
+    "description": "SaaS-specific payments"
+  },
+  {
+    "category": "niche",
+    "subcategory": "vertical",
+    "prompt": "Payment platforms optimized for marketplaces",
+    "description": "Marketplace payments"
+  },
+  {
+    "category": "niche",
+    "subcategory": "vertical",
+    "prompt": "Top solutions for high-risk merchant payments",
+    "description": "High-risk payments"
+  },
+  {
+    "category": "niche",
+    "subcategory": "vertical",
+    "prompt": "Payment processors for cryptocurrency transactions",
+    "description": "Crypto payments"
+  },
+  {
+    "category": "niche",
+    "subcategory": "feature",
+    "prompt": "Which platforms offer the best developer API?",
+    "description": "Developer-focused APIs"
+  },
+  {
+    "category": "niche",
+    "subcategory": "feature",
+    "prompt": "Platforms with advanced fraud detection capabilities",
+    "description": "Fraud protection"
+  },
+  {
+    "category": "niche",
+    "subcategory": "feature",
+    "prompt": "Solutions with built-in analytics and reporting",
+    "description": "Analytics features"
+  },
+  {
+    "category": "niche",
+    "subcategory": "feature",
+    "prompt": "Payment systems with white-label options",
+    "description": "White-label solutions"
+  },
+  {
+    "category": "niche",
+    "subcategory": "price_point",
+    "prompt": "Most affordable payment processor for small businesses",
+    "description": "Budget-friendly options"
+  },
+  {
+    "category": "niche",
+    "subcategory": "price_point",
+    "prompt": "Payment platforms with lowest transaction fees",
+    "description": "Low-fee options"
+  },
+  {
+    "category": "niche",
+    "subcategory": "price_point",
+    "prompt": "Enterprise-grade payment solutions comparison",
+    "description": "Enterprise payments"
+  },
+  {
+    "category": "niche",
+    "subcategory": "price_point",
+    "prompt": "Most cost-effective payment gateway for startups",
+    "description": "Startup pricing"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "head_to_head",
+    "prompt": "Compare Stripe and PayPal for online payments",
+    "description": "Direct 1v1 comparison"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "head_to_head",
+    "prompt": "Square vs Stripe vs PayPal: which is best?",
+    "description": "Multi-way comparison"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "head_to_head",
+    "prompt": "Comparing payment processors: features and pricing",
+    "description": "Feature comparison"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "head_to_head",
+    "prompt": "How do modern payment platforms differentiate?",
+    "description": "Differentiation analysis"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "feature_focus",
+    "prompt": "Which payment processor has the best API documentation?",
+    "description": "API quality comparison"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "feature_focus",
+    "prompt": "Comparing developer experience across payment platforms",
+    "description": "Developer UX"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "feature_focus",
+    "prompt": "Security features: payments providers ranked",
+    "description": "Security comparison"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "feature_focus",
+    "prompt": "Settlement speed comparison among major processors",
+    "description": "Settlement comparison"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "use_case_specific",
+    "prompt": "Best payment processor for e-commerce in 2024",
+    "description": "E-commerce best choice"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "use_case_specific",
+    "prompt": "Payment solutions ranked for SaaS businesses",
+    "description": "SaaS ranking"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "use_case_specific",
+    "prompt": "Top payment platforms for marketplaces",
+    "description": "Marketplace ranking"
+  },
+  {
+    "category": "comparison",
+    "subcategory": "use_case_specific",
+    "prompt": "Payment processors evaluated for global commerce",
+    "description": "Global ranking"
+  },
+  {
+    "category": "brand",
+    "subcategory": "attributes",
+    "prompt": "What makes Stripe stand out in payment processing?",
+    "description": "Stripe differentiation"
+  },
+  {
+    "category": "brand",
+    "subcategory": "attributes",
+    "prompt": "Why do developers prefer Stripe?",
+    "description": "Stripe developer appeal"
+  },
+  {
+    "category": "brand",
+    "subcategory": "attributes",
+    "prompt": "Stripe's competitive advantages in fintech",
+    "description": "Stripe advantages"
+  },
+  {
+    "category": "brand",
+    "subcategory": "attributes",
+    "prompt": "How has Stripe evolved as a payment platform?",
+    "description": "Stripe evolution"
+  },
+  {
+    "category": "brand",
+    "subcategory": "positioning",
+    "prompt": "Is Stripe the best payment processor?",
+    "description": "Market leadership"
+  },
+  {
+    "category": "brand",
+    "subcategory": "positioning",
+    "prompt": "Stripe's market position vs competitors",
+    "description": "Competitive position"
+  },
+  {
+    "category": "brand",
+    "subcategory": "positioning",
+    "prompt": "What companies use Stripe and why?",
+    "description": "Customer base"
+  },
+  {
+    "category": "brand",
+    "subcategory": "positioning",
+    "prompt": "Stripe's role in the fintech ecosystem",
+    "description": "Ecosystem role"
+  },
+  {
+    "category": "brand",
+    "subcategory": "features",
+    "prompt": "Analyzing Stripe's API capabilities",
+    "description": "API analysis"
+  },
+  {
+    "category": "brand",
+    "subcategory": "features",
+    "prompt": "Stripe's features for payment processing excellence",
+    "description": "Feature excellence"
+  },
+  {
+    "category": "brand",
+    "subcategory": "features",
+    "prompt": "How does Stripe handle complex payment workflows?",
+    "description": "Workflow handling"
+  },
+  {
+    "category": "brand",
+    "subcategory": "features",
+    "prompt": "Stripe's approach to payment security",
+    "description": "Security approach"
+  },
+  {
+    "category": "brand",
+    "subcategory": "market_strategy",
+    "prompt": "Stripe's expansion strategy in emerging markets",
+    "description": "Market expansion"
+  },
+  {
+    "category": "brand",
+    "subcategory": "market_strategy",
+    "prompt": "How investors view Stripe's business model",
+    "description": "Business model"
+  }
+]
