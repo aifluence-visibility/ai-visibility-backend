@@ -19,9 +19,12 @@ const allPrompts = JSON.parse(fs.readFileSync(promptsFile, 'utf8'));
 
 // Middleware
 app.use(cors({
-  origin: "http://localhost:3001",
-  methods: ["GET", "POST"],
-  allowedHeaders: ["Content-Type"]
+  origin: [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "https://ai-visibility-frontend-psi.vercel.app"
+  ],
+  credentials: true
 }));
 app.use(express.json());
 
@@ -108,10 +111,8 @@ function normalizeCompanyCandidate(value) {
     .trim();
 }
 
-function toLowerSafe(value, fallback = '') {
-  if (typeof value === 'string') return value.toLowerCase();
-  if (value === null || value === undefined) return fallback;
-  return String(value).toLowerCase();
+function toLowerSafe(value) {
+  return typeof value === 'string' ? value.toLowerCase() : '';
 }
 
 function looksLikeCompanyName(candidate) {
@@ -1174,36 +1175,43 @@ app.post('/analyze', async (req, res) => {
     
     // Validate input
     if (!brandName || typeof brandName !== 'string') {
-      return res.status(400).json({ 
-        error: 'brandName is required and must be a string' 
-      });
+      return res.status(400).json({ error: 'brandName required' });
     }
     
     if (!Array.isArray(prompts) || prompts.length === 0) {
-      return res.status(400).json({ 
-        error: 'prompts is required and must be a non-empty array' 
-      });
+      return res.status(400).json({ error: 'prompts required' });
+    }
+
+    const safeBrandName = brandName.trim();
+    if (!safeBrandName) {
+      return res.status(400).json({ error: 'brandName required' });
+    }
+
+    const safePrompts = prompts
+      .filter((item) => typeof item === 'string')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    if (safePrompts.length === 0) {
+      return res.status(400).json({ error: 'prompts required' });
     }
     
     // Validate analysisType
     const validTypes = ['generic', 'comparison', 'attribute'];
     const finalAnalysisType = validTypes.includes(analysisType) ? analysisType : 'generic';
     
-    console.log(`   Brand: ${brandName}`);
+    console.log(`   Brand: ${safeBrandName}`);
     console.log(`   Analysis Type: ${finalAnalysisType}`);
-    console.log(`   Prompts: ${JSON.stringify(prompts)}`);
+    console.log(`   Prompts: ${JSON.stringify(safePrompts)}`);
     
     // Perform real analysis with OpenAI API responses
-    const analysis = await performAnalysis(brandName, prompts, finalAnalysisType);
+    const analysis = await performAnalysis(safeBrandName, safePrompts, finalAnalysisType);
     
     console.log('\n📤 Sending Response...');
     res.json({
-      success: true,
-      data: {
-        brand: brandName,
-        ...analysis,
-        timestamp: new Date().toISOString()
-      }
+      brand: safeBrandName,
+      ...analysis,
+      timestamp: new Date().toISOString()
     });
   } catch (error) {
     console.error('❌ Error occurred:', error.message);
