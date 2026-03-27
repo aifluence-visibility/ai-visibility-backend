@@ -108,13 +108,19 @@ function normalizeCompanyCandidate(value) {
     .trim();
 }
 
+function toLowerSafe(value, fallback = '') {
+  if (typeof value === 'string') return value.toLowerCase();
+  if (value === null || value === undefined) return fallback;
+  return String(value).toLowerCase();
+}
+
 function looksLikeCompanyName(candidate) {
   if (!candidate) return false;
 
   const normalized = normalizeCompanyCandidate(candidate);
   if (!normalized || normalized.length < 2 || normalized.length > 40) return false;
 
-  const lower = normalized.toLowerCase();
+  const lower = toLowerSafe(normalized);
   if (blockedCompetitorTerms.has(lower)) return false;
   if (/\b(analysis|category|market|positioning|visibility|landscape)\b/i.test(normalized)) return false;
   if (/\d{3,}/.test(normalized)) return false;
@@ -122,7 +128,7 @@ function looksLikeCompanyName(candidate) {
   const tokens = normalized.split(' ');
   if (tokens.length > 4) return false;
 
-  const blockedTokenRatio = tokens.filter((token) => blockedCompetitorTokens.has(token.toLowerCase())).length / tokens.length;
+  const blockedTokenRatio = tokens.filter((token) => blockedCompetitorTokens.has(toLowerSafe(token))).length / tokens.length;
   if (blockedTokenRatio >= 0.5) return false;
 
   // Proper noun heuristic: at least one token starts with uppercase or is all-caps acronym.
@@ -142,7 +148,7 @@ function inferDomainsFromBrands(brands) {
 }
 
 function classifySourceType(domain) {
-  const lower = (domain || '').toLowerCase();
+  const lower = toLowerSafe(domain);
   if (/reddit|quora|medium|substack|discord/.test(lower)) return 'community';
   if (/techcrunch|forbes|wired|venturebeat|bloomberg|cnbc|businessinsider|theinformation/.test(lower)) return 'media';
   if (/association|journal|whitepaper|report|industry|insider|review|g2|capterra/.test(lower)) return 'industry';
@@ -161,7 +167,7 @@ function scoreSourceQuality(source, industry) {
     industry: 68,
     community: 55
   };
-  const industryBoost = source.includes((industry || '').toLowerCase()) ? 5 : 0;
+  const industryBoost = source.includes(toLowerSafe(industry)) ? 5 : 0;
   return {
     source,
     type,
@@ -285,7 +291,7 @@ function extractCompetitors(text, industry = null, brandName = null) {
 
   const found = new Set();
 
-  const excludedBrand = brandName ? brandName.toLowerCase() : null;
+  const excludedBrand = brandName ? toLowerSafe(brandName) : null;
 
   // Dynamic extraction patterns for company-like names.
   const companyPatterns = [
@@ -301,7 +307,7 @@ function extractCompetitors(text, industry = null, brandName = null) {
       matches.forEach(match => {
         const candidate = normalizeCompanyCandidate(match);
         if (!looksLikeCompanyName(candidate)) return;
-        if (excludedBrand && candidate.toLowerCase() === excludedBrand) return;
+        if (excludedBrand && toLowerSafe(candidate) === excludedBrand) return;
 
         if (!industry || scoreCompetitorRelevance(candidate, industry) > 0 || knownCompanyDomains[candidate]) {
           found.add(candidate);
@@ -316,7 +322,7 @@ function extractCompetitors(text, industry = null, brandName = null) {
   while ((match = competitorIndicators.exec(text)) !== null) {
     const competitor = normalizeCompanyCandidate(match[2]);
     if (!looksLikeCompanyName(competitor)) continue;
-    if (excludedBrand && competitor.toLowerCase() === excludedBrand) continue;
+    if (excludedBrand && toLowerSafe(competitor) === excludedBrand) continue;
     if (!industry || scoreCompetitorRelevance(competitor, industry) > 0 || knownCompanyDomains[competitor]) {
       found.add(competitor);
     }
@@ -326,7 +332,7 @@ function extractCompetitors(text, industry = null, brandName = null) {
   Object.keys(knownCompanyDomains).forEach((company) => {
     const pattern = new RegExp(`\\b${company.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`, 'i');
     if (pattern.test(text)) {
-      if (!excludedBrand || company.toLowerCase() !== excludedBrand) {
+      if (!excludedBrand || toLowerSafe(company) !== excludedBrand) {
         found.add(company);
       }
     }
@@ -334,7 +340,7 @@ function extractCompetitors(text, industry = null, brandName = null) {
 
   const allCompetitors = Array.from(found)
     .filter((comp) => looksLikeCompanyName(comp))
-    .filter((comp) => !excludedBrand || comp.toLowerCase() !== excludedBrand)
+    .filter((comp) => !excludedBrand || toLowerSafe(comp) !== excludedBrand)
     .filter((comp) => isTrustedCompetitor(comp, industry));
 
   // Return only real-looking company names; empty means no trustworthy competitor signal.
@@ -351,8 +357,8 @@ function analyzeBrandPosition(brandName, text) {
     return { position: 'none', percentage: 0 };
   }
 
-  const lowerText = text.toLowerCase();
-  const lowerBrand = brandName.toLowerCase();
+  const lowerText = toLowerSafe(text);
+  const lowerBrand = toLowerSafe(brandName);
   const index = lowerText.indexOf(lowerBrand);
 
   if (index === -1) {
@@ -376,8 +382,8 @@ function detectMentionContext(brandName, text) {
 
   if (!text) return contexts;
 
-  const lowerText = text.toLowerCase();
-  const lowerBrand = brandName.toLowerCase();
+  const lowerText = toLowerSafe(text);
+  const lowerBrand = toLowerSafe(brandName);
 
   // List format detection: numbered/bulleted lists
   if (/^[\s]*[\d\.\-*•]\s+.+{brandName}/im.test(text) || 
@@ -391,7 +397,7 @@ function detectMentionContext(brandName, text) {
   }
 
   // Paragraph explanation: longer explanatory context
-  const sentenceWithBrand = text.split('.').find(s => s.toLowerCase().includes(lowerBrand));
+  const sentenceWithBrand = text.split('.').find(s => toLowerSafe(s).includes(lowerBrand));
   if (sentenceWithBrand && sentenceWithBrand.length > 50) {
     contexts.paragraphExplanation = true;
   }
@@ -506,7 +512,7 @@ function scoreCompetitorRelevance(competitorName, industry) {
     ecommerce: ['Shopify', 'WooCommerce', 'BigCommerce', 'Wix', 'Magento']
   };
   
-  const normalizedIndustry = industry.toLowerCase().replace(/\s+/g, '');
+  const normalizedIndustry = toLowerSafe(industry).replace(/\s+/g, '');
   const relevantsForIndustry = industryRelated[normalizedIndustry] || [];
   
   if (relevantsForIndustry.includes(competitorName)) return 3;
@@ -957,7 +963,7 @@ function generateInsights(brandName, globalScore, countryScore, globalCategorySc
 
   const problemLine = isLimitedData
     ? `Problem: ${brandName} shows ${limitedVisibilityLabel} in ${totalPrompts} sampled prompts.`
-    : `Problem: ${brandName} has ${visibilityLabel.toLowerCase()} AI visibility with ${totalBrandMentions}/${totalPrompts} mentions.`;
+    : `Problem: ${brandName} has ${toLowerSafe(visibilityLabel)} AI visibility with ${totalBrandMentions}/${totalPrompts} mentions.`;
 
   const evidenceLine = topCompetitor
     ? `Evidence: ${brandName} appears in ${totalBrandMentions}/${totalPrompts} prompts while ${topCompetitor.name} appears in ${topCompetitor.mentions}/${Math.max(1, totalPrompts)} prompts. Source confidence score: ${sourceConfidenceScore}/100.`
@@ -1257,7 +1263,7 @@ app.post('/test', async (req, res) => {
           // Construct intelligent prompt based on category
           let finalPrompt = item.prompt;
           if (category === 'comparison') {
-            if (!item.prompt.includes(brandName) && !item.prompt.toLowerCase().includes('vs')) {
+            if (!item.prompt.includes(brandName) && !toLowerSafe(item.prompt).includes('vs')) {
               finalPrompt = `Compare "${brandName}" with other leading options for: ${item.prompt}. What are key differences?`;
             }
           } else if (category === 'brand') {
@@ -1418,13 +1424,13 @@ const industryThemes = {
 
 function normalizeIndustry(industry) {
   if (!industry || typeof industry !== 'string') return null;
-  return industry.trim().toLowerCase().replace(/\s+/g, '_');
+  return toLowerSafe(industry.trim()).replace(/\s+/g, '_');
 }
 
 function getIndustryConfig(industry) {
   const key = normalizeIndustry(industry);
   return industryThemes[key] || {
-    label: (industry || 'industry').toLowerCase(),
+    label: toLowerSafe(industry || 'industry'),
     terms: ['product', 'service', 'market', 'growth', 'strategy']
   };
 }
