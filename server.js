@@ -2,11 +2,21 @@ const express = require('express');
 const { OpenAI } = require('openai');
 const fs = require('fs');
 const path = require('path');
-const cors = require('cors');
+const cors = require("cors");
 const config = require('./config');
 
 const app = express();
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+app.options("*", cors());
+
 const PORT = config.server.port;
+const KEEP_ALIVE_INTERVAL_MS = 5 * 60 * 1000;
+const OPENAI_TIMEOUT_MS = 30000;
+const ANALYZE_TIMEOUT_MS = Number(process.env.ANALYZE_TIMEOUT_MS || 90000);
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -18,15 +28,11 @@ const promptsFile = path.join(__dirname, 'prompts.json');
 const allPrompts = JSON.parse(fs.readFileSync(promptsFile, 'utf8'));
 
 // Middleware
-app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "https://ai-visibility-frontend-psi.vercel.app"
-  ],
-  credentials: true
-}));
 app.use(express.json());
+app.use((req, res, next) => {
+  console.log("Incoming request:", req.method, req.url);
+  next();
+});
 
 const commonCompetitors = [
   'Salesforce', 'HubSpot', 'Microsoft', 'Google', 'Amazon', 'IBM',
@@ -209,8 +215,24 @@ function isTrustedCompetitor(competitorName, industry) {
   return scoreCompetitorRelevance(competitorName, industry) >= 2;
 }
 
-// Get real response from OpenAI API with smart prompt engineering
-async function getAIResponse(prompt, brandName = null, analysisType = 'generic', industry = null, mode = 'quick') {
+function createFallbackAIResponse(prompt, brandName = null, analysisType = 'generic', industry = null, reason = 'temporary_openai_issue') {
+  const safeBrand = brandName || 'the brand';
+  const safeIndustry = industry || 'the target market';
+  return [
+    `Fallback analysis (${reason}).`,
+    `${safeBrand} requires stronger AI visibility in ${safeIndustry}.`,
+    `Priority: publish comparison and category pages tied to "${analysisType}" intent.`,
+    `Prompt context: ${prompt}`
+  ].join(' ');
+}
+
+// Get response via timeout-safe fetch that always resolves to a string.
+async function getAIResponseSafe(prompt, brandName = null, analysisType = 'generic', industry = null, mode = 'quick') {
+  const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+  const FETCH_TIMEOUT_MS = 10000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
   try {
     // Enhanced prompt construction based on category and industry
     let finalPrompt = prompt;
@@ -220,19 +242,20 @@ async function getAIResponse(prompt, brandName = null, analysisType = 'generic',
       if (analysisType === 'comparison') {
         finalPrompt = `Analyze how ${brandName} compares to other ${industry} solutions. Examine positioning, competitive advantages, and market dynamics.`;
         systemContext = `You are a market intelligence analyst specializing in ${industry}. Focus on competitive positioning, feature comparisons, and market share dynamics.`;
-
       } else if (analysisType === 'brand') {
         finalPrompt = `Evaluate ${brandName}'s market presence and positioning in ${industry}. Assess strategic positioning and market challenges.`;
         systemContext = `You are an AI visibility strategist specializing in ${industry} brand positioning. Analyze how brands perform in AI-generated responses and provide strategic insights.`;
-
       } else if (analysisType === 'niche') {
         finalPrompt = `When considering specialized ${industry} applications, evaluate market positioning and competitive landscape.`;
         systemContext = `You are a ${industry} market researcher. Focus on niche segments and specialized use cases.`;
-
       } else { // generic
         finalPrompt = `In the context of ${industry} solutions, analyze market trends and positioning.`;
         systemContext = `You are a market intelligence analyst specializing in ${industry}. Focus on strategic insights and competitive positioning.`;
       }
+    }
+
+    if (mode === 'full') {
+      systemContext += ' For full analysis, provide richer evidence, mention real competitor brands when appropriate, and cite real websites or domains when they are implied by the market context.';
     }
 
     console.log('\n📡 Calling OpenAI API...');
@@ -241,41 +264,61 @@ async function getAIResponse(prompt, brandName = null, analysisType = 'generic',
     console.log(`   Industry: ${industry}`);
     console.log(`   Prompt: "${finalPrompt.substring(0, 120)}..."`);
 
-    // Add timeout wrapper for OpenAI call
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('OpenAI request timeout after 30 seconds')), 30000);
+    const response = await fetch(OPENAI_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.openai.apiKey}`
+      },
+      body: JSON.stringify({
+        model: config.openai.model,
+        messages: [
+          {
+            role: 'system',
+            content: systemContext
+          },
+          {
+            role: 'user',
+            content: finalPrompt
+          }
+        ],
+        temperature: mode === 'full' ? 0.45 : 0.6,
+        max_tokens: mode === 'full' ? 950 : 700
+      }),
+      signal: controller.signal
     });
 
-    if (mode === 'full') {
-      systemContext += ' For full analysis, provide richer evidence, mention real competitor brands when appropriate, and cite real websites or domains when they are implied by the market context.';
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (parseError) {
+      const reason = parseError && parseError.message ? parseError.message : 'response_parse_error';
+      return createFallbackAIResponse(prompt, brandName, analysisType, industry, `openai_parse_error:${reason}`);
     }
 
-    const openaiPromise = openai.chat.completions.create({
-      model: config.openai.model,
-      messages: [
-        {
-          role: 'system',
-          content: systemContext
-        },
-        {
-          role: 'user',
-          content: finalPrompt
-        }
-      ],
-      temperature: mode === 'full' ? 0.45 : 0.6,
-      max_tokens: mode === 'full' ? 950 : 700
-    });
+    if (!response.ok) {
+      const apiError = data && data.error && data.error.message ? data.error.message : `status_${response.status}`;
+      return createFallbackAIResponse(prompt, brandName, analysisType, industry, `openai_http_error:${apiError}`);
+    }
 
-    const response = await Promise.race([openaiPromise, timeoutPromise]);
+    const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content
+      ? data.choices[0].message.content
+      : '';
 
-    const content = response.choices[0].message.content;
+    if (!content || typeof content !== 'string') {
+      return createFallbackAIResponse(prompt, brandName, analysisType, industry, 'openai_empty_content');
+    }
+
     console.log(`   ✅ Response received (${content.length} characters)`);
     console.log(`   Preview: ${content.substring(0, 120)}...`);
-
     return content;
   } catch (error) {
-    console.error('❌ OpenAI API error:', error.message);
-    throw error;
+    const message = error && error.message ? error.message : 'unknown_error';
+    const reason = error && error.name === 'AbortError' ? 'openai_timeout' : `openai_error:${message}`;
+    console.error('❌ OpenAI API error:', message);
+    return createFallbackAIResponse(prompt, brandName, analysisType, industry, reason);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -1115,11 +1158,22 @@ async function performAnalysis(brandName, prompts, analysisType = 'generic', ind
   for (let i = 0; i < prompts.length; i++) {
     const prompt = prompts[i];
     console.log(`\n   [${i + 1}/${prompts.length}] Analyzing: "${prompt}"`);
-    
-    // Pass brandName, analysisType, and industry to improve prompt engineering
-    const response = await getAIResponse(prompt, brandName, analysisType, industry);
-    const mentions = detectBrandMentions(brandName, response);
-    const competitors = extractCompetitors(response, industry);
+
+    let response = '';
+    let mentions = 0;
+    let competitors = [];
+
+    try {
+      // Pass brandName, analysisType, and industry to improve prompt engineering
+      response = await getAIResponseSafe(prompt, brandName, analysisType, industry);
+      mentions = detectBrandMentions(brandName, response);
+      competitors = extractCompetitors(response, industry);
+    } catch (error) {
+      console.error(`       OpenAI processing failed for prompt: ${error.message}`);
+      response = createFallbackAIResponse(prompt, brandName, analysisType, industry, 'analysis_prompt_failure');
+      mentions = 0;
+      competitors = [];
+    }
     
     console.log(`       Brand "${brandName}" mentioned: ${mentions} time(s)`);
     console.log(`       Competitors found: ${competitors.length > 0 ? competitors.join(', ') : 'none'}`);
@@ -1204,8 +1258,13 @@ app.post('/analyze', async (req, res) => {
     console.log(`   Analysis Type: ${finalAnalysisType}`);
     console.log(`   Prompts: ${JSON.stringify(safePrompts)}`);
     
-    // Perform real analysis with OpenAI API responses
-    const analysis = await performAnalysis(safeBrandName, safePrompts, finalAnalysisType);
+    // Bound execution time so frontend requests don't hang indefinitely.
+    const analysisPromise = performAnalysis(safeBrandName, safePrompts, finalAnalysisType);
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`Analyze request timeout after ${Math.round(ANALYZE_TIMEOUT_MS / 1000)} seconds`)), ANALYZE_TIMEOUT_MS);
+    });
+
+    const analysis = await Promise.race([analysisPromise, timeoutPromise]);
     
     console.log('\n📤 Sending Response...');
     res.json({
@@ -1216,9 +1275,38 @@ app.post('/analyze', async (req, res) => {
   } catch (error) {
     console.error('❌ Error occurred:', error.message);
     console.error('   Stack:', error.stack);
-    res.status(500).json({
-      error: 'Analysis failed',
-      message: error.message
+    const fallbackBrand = typeof req.body?.brandName === 'string' && req.body.brandName.trim()
+      ? req.body.brandName.trim()
+      : 'Unknown Brand';
+
+    const fallbackPrompts = Array.isArray(req.body?.prompts)
+      ? req.body.prompts.filter((p) => typeof p === 'string' && p.trim())
+      : [];
+
+    const fallbackMentionsByPrompt = fallbackPrompts.map((prompt) => ({
+      prompt,
+      mentions: 0,
+      competitors: [],
+      analysisType: 'generic'
+    }));
+
+    res.json({
+      brand: fallbackBrand,
+      visibilityScore: 0,
+      totalMentions: 0,
+      mentionsByPrompt: fallbackMentionsByPrompt,
+      competitors: [],
+      analyzedResponses: fallbackPrompts.map((prompt) => ({
+        prompt,
+        response: createFallbackAIResponse(prompt, fallbackBrand, 'generic', null, 'analyze_route_fallback'),
+        brandMentions: 0,
+        competitorsFound: [],
+        analysisType: 'generic'
+      })),
+      analysisType: 'generic',
+      fallback: true,
+      error: error.message,
+      timestamp: new Date().toISOString()
     });
   }
 });
@@ -1626,7 +1714,7 @@ async function executePromptSetSequentially(prompts, brandName, setName, industr
       let sources = [];
 
       try {
-        responseText = await getAIResponse(item.prompt, brandName, item.category, industry, mode);
+        responseText = await getAIResponseSafe(item.prompt, brandName, item.category, industry, mode);
         mentions = detectBrandMentions(brandName, responseText);
         competitors = extractCompetitors(responseText, industry, brandName);
         positionAnalysis = analyzeBrandPosition(brandName, responseText);
@@ -2103,10 +2191,1037 @@ app.post('/full-analysis', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// ── ENTERPRISE: Workspace & Team System ──
+// ═══════════════════════════════════════════════════════════════
+
+const workspaces = new Map(); // id -> workspace
+const ROLES = ['owner', 'manager', 'analyst', 'content'];
+const ROLE_PERMISSIONS = {
+  owner:    ['read', 'write', 'analyze', 'strategy', 'content', 'tracking', 'portfolio', 'team', 'billing', 'reports'],
+  manager:  ['read', 'write', 'analyze', 'strategy', 'content', 'tracking', 'portfolio', 'reports'],
+  analyst:  ['read', 'analyze', 'strategy', 'tracking'],
+  content:  ['read', 'analyze', 'content'],
+};
+
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// Create workspace
+app.post('/workspace', (req, res) => {
+  const { name, ownerEmail, plan } = req.body;
+  if (!name || !ownerEmail) return res.status(400).json({ error: 'name and ownerEmail required.' });
+
+  const id = generateId();
+  const workspace = {
+    id, name: String(name).slice(0, 100),
+    plan: ['free', 'pro', 'enterprise'].includes(plan) ? plan : 'free',
+    createdAt: new Date().toISOString(),
+    members: [{ email: String(ownerEmail).slice(0, 200), role: 'owner', joinedAt: new Date().toISOString() }],
+  };
+  workspaces.set(id, workspace);
+  res.json({ workspace });
+});
+
+// Get workspace
+app.get('/workspace/:id', (req, res) => {
+  const ws = workspaces.get(req.params.id);
+  if (!ws) return res.status(404).json({ error: 'Workspace not found.' });
+  res.json({ workspace: ws });
+});
+
+// Update workspace plan
+app.patch('/workspace/:id', (req, res) => {
+  const ws = workspaces.get(req.params.id);
+  if (!ws) return res.status(404).json({ error: 'Workspace not found.' });
+  if (req.body.plan && ['free', 'pro', 'enterprise'].includes(req.body.plan)) ws.plan = req.body.plan;
+  if (req.body.name) ws.name = String(req.body.name).slice(0, 100);
+  res.json({ workspace: ws });
+});
+
+// Add member
+app.post('/workspace/:id/members', (req, res) => {
+  const ws = workspaces.get(req.params.id);
+  if (!ws) return res.status(404).json({ error: 'Workspace not found.' });
+  const { email, role } = req.body;
+  if (!email) return res.status(400).json({ error: 'email required.' });
+  if (!ROLES.includes(role)) return res.status(400).json({ error: `role must be one of: ${ROLES.join(', ')}` });
+  if (ws.members.some(m => m.email === email)) return res.status(409).json({ error: 'Member already exists.' });
+
+  const maxMembers = ws.plan === 'enterprise' ? 50 : ws.plan === 'pro' ? 5 : 1;
+  if (ws.members.length >= maxMembers) return res.status(403).json({ error: `Plan "${ws.plan}" allows max ${maxMembers} members.` });
+
+  ws.members.push({ email: String(email).slice(0, 200), role, joinedAt: new Date().toISOString() });
+  res.json({ workspace: ws });
+});
+
+// Update member role
+app.patch('/workspace/:id/members/:email', (req, res) => {
+  const ws = workspaces.get(req.params.id);
+  if (!ws) return res.status(404).json({ error: 'Workspace not found.' });
+  const member = ws.members.find(m => m.email === req.params.email);
+  if (!member) return res.status(404).json({ error: 'Member not found.' });
+  if (!ROLES.includes(req.body.role)) return res.status(400).json({ error: `role must be one of: ${ROLES.join(', ')}` });
+  member.role = req.body.role;
+  res.json({ workspace: ws });
+});
+
+// Remove member
+app.delete('/workspace/:id/members/:email', (req, res) => {
+  const ws = workspaces.get(req.params.id);
+  if (!ws) return res.status(404).json({ error: 'Workspace not found.' });
+  const idx = ws.members.findIndex(m => m.email === req.params.email);
+  if (idx === -1) return res.status(404).json({ error: 'Member not found.' });
+  if (ws.members[idx].role === 'owner') return res.status(403).json({ error: 'Cannot remove workspace owner.' });
+  ws.members.splice(idx, 1);
+  res.json({ workspace: ws });
+});
+
+// Get permissions for role
+app.get('/permissions/:role', (req, res) => {
+  const perms = ROLE_PERMISSIONS[req.params.role];
+  if (!perms) return res.status(400).json({ error: 'Invalid role.' });
+  res.json({ role: req.params.role, permissions: perms });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ── ENTERPRISE: Feature Gating ──
+// ═══════════════════════════════════════════════════════════════
+
+const PLAN_FEATURES = {
+  free:       ['dashboard', 'visibility', 'prompts', 'competitors', 'opportunities', 'sentiment', 'settings'],
+  pro:        ['dashboard', 'visibility', 'prompts', 'competitors', 'opportunities', 'sentiment', 'settings',
+               'actions', 'growth', 'strategy-advisor', 'critical-insight', 'content-strategy', 'article-generator', 'performance-tracker'],
+  enterprise: ['dashboard', 'visibility', 'prompts', 'competitors', 'opportunities', 'sentiment', 'settings',
+               'actions', 'growth', 'strategy-advisor', 'critical-insight', 'content-strategy', 'article-generator', 'performance-tracker',
+               'portfolio', 'team', 'reports'],
+};
+
+app.get('/plan-features/:plan', (req, res) => {
+  const features = PLAN_FEATURES[req.params.plan];
+  if (!features) return res.status(400).json({ error: 'Invalid plan. Use free, pro, or enterprise.' });
+  res.json({ plan: req.params.plan, features, allPlans: Object.keys(PLAN_FEATURES) });
+});
+
+app.post('/check-feature', (req, res) => {
+  const { plan, feature } = req.body;
+  if (!plan || !feature) return res.status(400).json({ error: 'plan and feature required.' });
+  const features = PLAN_FEATURES[plan] || PLAN_FEATURES.free;
+  res.json({ allowed: features.includes(feature), plan, feature, upgrade: !features.includes(feature) ? getUpgradePlan(plan, feature) : null });
+});
+
+function getUpgradePlan(currentPlan, feature) {
+  const order = ['free', 'pro', 'enterprise'];
+  for (const p of order) {
+    if (PLAN_FEATURES[p]?.includes(feature) && order.indexOf(p) > order.indexOf(currentPlan)) return p;
+  }
+  return 'enterprise';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ── ENTERPRISE: Weekly Report Generator ──
+// ═══════════════════════════════════════════════════════════════
+
+app.post('/generate-report', async (req, res) => {
+  const { brands, reportType } = req.body;
+
+  if (!Array.isArray(brands) || brands.length < 1 || brands.length > 10) {
+    return res.status(400).json({ error: 'Provide 1-10 brand analysis objects.' });
+  }
+
+  try {
+    const compact = (d) => ({
+      brandName: String(d.brandName || '').slice(0, 100),
+      industry: String(d.industry || '').slice(0, 100),
+      visibilityScore: Number(d.visibilityScore) || 0,
+      competitorPressureScore: Number(d.competitorPressureScore) || 0,
+      totalMentions: Number(d.totalMentions) || 0,
+      queryTrafficLossPct: Number(d.queryTrafficLossPct) || 0,
+      topCompetitors: (Array.isArray(d.topCompetitors) ? d.topCompetitors : []).slice(0, 3).map(c => ({
+        name: String(c.name || '').slice(0, 80), mentionCount: Number(c.mentionCount) || 0,
+      })),
+      summaryInsight: String(d.summaryInsight || '').slice(0, 200),
+    });
+
+    const portfolio = brands.map(compact);
+    const type = reportType === 'monthly' ? 'Monthly' : 'Weekly';
+
+    const systemPrompt = `You are a senior AI visibility analyst generating a ${type} Executive Report.
+
+## PORTFOLIO DATA
+${JSON.stringify(portfolio)}
+
+## TASK
+Generate a comprehensive ${type} Report for the leadership team.
+
+## OUTPUT FORMAT (STRICT — use exact headers)
+
+# ${type} AI Visibility Report
+*Generated ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}*
+
+## Executive Summary
+(3-4 sentence overview of the portfolio's AI visibility status)
+
+## Portfolio Scorecard
+| Brand | Visibility | Mentions | Comp. Pressure | Risk Level |
+(table with all brands)
+
+## 🏆 Top Performer
+(which brand, why, with numbers)
+
+## 🚨 Highest Risk
+(which brand, why, with numbers)
+
+## Key Risks
+- Risk 1 (specific, with data)
+- Risk 2
+- Risk 3
+
+## Growth Opportunities
+- Opportunity 1 (specific brand + action)
+- Opportunity 2
+- Opportunity 3
+
+## Recommended Actions — Next ${type === 'Monthly' ? '30 Days' : '7 Days'}
+1. **Priority 1**: (brand + specific action)
+2. **Priority 2**: (brand + specific action)
+3. **Priority 3**: (brand + specific action)
+
+## Competitive Landscape
+(2-3 sentences about competitor trends across the portfolio)
+
+## Forecast
+(expected trajectory if actions are taken vs. not taken)
+
+## RULES
+- Use real numbers from the data
+- Be specific — name brands and competitors
+- Focus on decisions, not descriptions
+- Executive-friendly language
+- No generic advice`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: config.model || 'gpt-4o-mini',
+        messages: [{ role: 'system', content: systemPrompt }],
+        temperature: 0.3,
+        max_tokens: 2500,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      console.error('OpenAI error in /generate-report:', response.status, errBody);
+      return res.status(502).json({ error: 'AI service error.' });
+    }
+
+    const json = await response.json();
+    const content = json.choices?.[0]?.message?.content || '';
+
+    return res.json({ report: content, generatedAt: new Date().toISOString(), type, brandCount: portfolio.length });
+  } catch (err) {
+    if (err.name === 'AbortError') return res.status(504).json({ error: 'Report generation timed out.' });
+    console.error('Report generator error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// ── Portfolio Analysis Endpoint ──
+app.post('/portfolio-analysis', async (req, res) => {
+  const { brands } = req.body;
+
+  if (!Array.isArray(brands) || brands.length < 2 || brands.length > 10) {
+    return res.status(400).json({ error: 'Provide 2-10 brand analysis objects in "brands" array.' });
+  }
+
+  for (const b of brands) {
+    if (!b || typeof b !== 'object' || !b.brandName) {
+      return res.status(400).json({ error: 'Each brand must have at least a brandName.' });
+    }
+  }
+
+  try {
+    const compact = (d) => ({
+      brandName: String(d.brandName || '').slice(0, 100),
+      industry: String(d.industry || '').slice(0, 100),
+      visibilityScore: Number(d.visibilityScore) || 0,
+      competitorPressureScore: Number(d.competitorPressureScore) || 0,
+      totalMentions: Number(d.totalMentions) || 0,
+      promptCount: Number(d.promptCount) || 0,
+      responseCount: Number(d.responseCount) || 0,
+      queryTrafficLossPct: Number(d.queryTrafficLossPct) || 0,
+      topCompetitors: (Array.isArray(d.topCompetitors) ? d.topCompetitors : []).slice(0, 3).map(c => ({
+        name: String(c.name || '').slice(0, 80),
+        mentionCount: Number(c.mentionCount) || 0,
+      })),
+      summaryInsight: String(d.summaryInsight || '').slice(0, 200),
+    });
+
+    const portfolio = brands.map(compact);
+
+    const systemPrompt = `You are an AI portfolio strategist inside an AI Visibility SaaS platform.
+
+You are given multiple brands with AI visibility data.
+
+## INPUT
+${JSON.stringify(portfolio)}
+
+## TASK
+1. Compare all brands
+2. Identify: strongest brand, weakest brand, biggest risk, biggest opportunity
+
+## OUTPUT FORMAT (STRICT)
+
+### 🚨 Portfolio Summary
+(what is happening overall — 2-3 sentences)
+
+### 🏆 Top Performer
+(which brand and why — reference actual scores)
+
+### ⚠️ At Risk Brand
+(which brand and why — reference actual scores)
+
+### 🔥 Biggest Opportunity
+(which brand + specific action to take)
+
+### 🧠 Recommended Focus
+- Priority 1: (specific action for specific brand)
+- Priority 2: (specific action for specific brand)
+- Priority 3: (specific action for specific brand)
+
+## RULES
+- Be strategic, not generic
+- Compare brands using actual numbers
+- Focus on decisions — what to do and why
+- Reference competitor names from the data
+- No generic marketing advice`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: config.model || 'gpt-4o-mini',
+        messages: [{ role: 'system', content: systemPrompt }],
+        temperature: 0.3,
+        max_tokens: 1000,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      console.error('OpenAI error in /portfolio-analysis:', response.status, errBody);
+      return res.status(502).json({ error: 'AI service error.' });
+    }
+
+    const json = await response.json();
+    const content = json.choices?.[0]?.message?.content || '';
+
+    return res.json({ analysis: content });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'Request timed out.' });
+    }
+    console.error('Portfolio analysis error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// ── Performance Tracker Endpoint ──
+app.post('/performance-tracker', async (req, res) => {
+  const { beforeData, afterData, strategyText } = req.body;
+
+  if (!beforeData || typeof beforeData !== 'object') {
+    return res.status(400).json({ error: 'beforeData (baseline) is required.' });
+  }
+  if (!afterData || typeof afterData !== 'object') {
+    return res.status(400).json({ error: 'afterData (current) is required.' });
+  }
+
+  try {
+    const safeStrategy = strategyText
+      ? String(strategyText).replace(/<[^>]*>/g, '').slice(0, 1000).trim()
+      : 'General AI visibility improvement efforts';
+
+    const compact = (d) => ({
+      brandName: String(d.brandName || '').slice(0, 100),
+      industry: String(d.industry || '').slice(0, 100),
+      visibilityScore: Number(d.visibilityScore) || 0,
+      competitorPressureScore: Number(d.competitorPressureScore) || 0,
+      totalMentions: Number(d.totalMentions) || 0,
+      promptCount: Number(d.promptCount) || 0,
+      responseCount: Number(d.responseCount) || 0,
+      queryTrafficLossPct: Number(d.queryTrafficLossPct) || 0,
+      topCompetitors: (Array.isArray(d.topCompetitors) ? d.topCompetitors : []).slice(0, 5).map(c => ({
+        name: String(c.name || '').slice(0, 80),
+        mentionCount: Number(c.mentionCount) || 0,
+        appearanceRate: Number(c.appearanceRate) || 0,
+      })),
+      topSources: (Array.isArray(d.topSources) ? d.topSources : []).slice(0, 5).map(s => ({
+        name: String(s.name || '').slice(0, 80),
+        mentionCount: Number(s.mentionCount) || 0,
+      })),
+      summaryInsight: String(d.summaryInsight || '').slice(0, 300),
+    });
+
+    const before = compact(beforeData);
+    const after = compact(afterData);
+
+    const systemPrompt = `You are an AI growth performance analyst inside an AI Visibility SaaS platform.
+
+You are NOT a chatbot. You are a performance tracking engine.
+
+## INPUT DATA
+
+### BEFORE (baseline)
+${JSON.stringify(before)}
+
+### AFTER (current)
+${JSON.stringify(after)}
+
+### STRATEGY APPLIED
+${safeStrategy}
+
+## YOUR TASK
+1. Compare BEFORE vs AFTER
+2. Detect improvements or declines
+3. Identify what worked / what failed
+4. Suggest next optimization steps
+
+## OUTPUT FORMAT (STRICT)
+
+### 📈 Performance Change
+- Visibility Score: X → Y (+/- %)
+- Mentions: X → Y
+- Competitor Pressure: up/down
+- Traffic Loss: X% → Y%
+
+### 🔥 Key Insight
+(1-2 sentences explaining the main result)
+
+### ✅ What Worked
+- Bullet points tied directly to strategy
+
+### ⚠️ What Didn't Work
+- Bullet points with explanations
+
+### 🧠 Next Best Actions
+- 3 prioritized, specific actions
+
+### 📊 Impact Summary
+- Estimated ROI
+- Visibility gain
+- Timeframe for full effect
+
+## RULES
+- Be analytical, not generic
+- Always compare BEFORE vs AFTER with real numbers
+- Focus on measurable change
+- Be decisive
+- Reference actual competitor names from the data
+- No generic marketing advice`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: config.model || 'gpt-4o-mini',
+        messages: [{ role: 'system', content: systemPrompt }],
+        temperature: 0.3,
+        max_tokens: 1200,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      console.error('OpenAI error in /performance-tracker:', response.status, errBody);
+      return res.status(502).json({ error: 'AI service error.' });
+    }
+
+    const json = await response.json();
+    const content = json.choices?.[0]?.message?.content || '';
+
+    return res.json({ analysis: content });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'Request timed out.' });
+    }
+    console.error('Performance tracker error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// ── Article Generator Endpoint ──
+app.post('/generate-article', async (req, res) => {
+  const { strategy, analysisData } = req.body;
+
+  if (!strategy || typeof strategy !== 'string' || strategy.trim().length < 10) {
+    return res.status(400).json({ error: 'A content strategy is required (min 10 characters).' });
+  }
+
+  if (!analysisData || typeof analysisData !== 'object') {
+    return res.status(400).json({ error: 'analysisData is required.' });
+  }
+
+  try {
+    const safeStrategy = strategy.replace(/<[^>]*>/g, '').slice(0, 3000).trim();
+    const d = analysisData;
+    const brandName = String(d.brandName || '').slice(0, 100);
+    const industry = String(d.industry || '').slice(0, 100);
+    const competitors = (Array.isArray(d.topCompetitors) ? d.topCompetitors : [])
+      .slice(0, 5)
+      .map(c => String(c.name || '').slice(0, 80))
+      .filter(Boolean);
+
+    const systemPrompt = `You are an expert SEO + AI content writer for "${brandName}" in the ${industry} industry.
+
+You are given a content strategy:
+${safeStrategy}
+
+Brand: ${brandName}
+Industry: ${industry}
+Competitors: ${competitors.join(', ') || 'Unknown'}
+
+## TASK
+Generate a FULL blog article that:
+- Ranks in Google (SEO optimized)
+- Is optimized for AI visibility (ChatGPT, Perplexity, Claude will cite it)
+- Beats ${competitors[0] || 'competitors'} in AI recommendations
+
+## STRUCTURE
+- Title (H1) — SEO + AI optimized
+- Introduction (2-3 paragraphs, hook + context + value promise)
+- 4-6 H2 sections with H3 subsections where appropriate
+- Bullet points and numbered lists for scannability
+- Comparison tables or "vs" sections referencing real competitors
+- FAQ section (5-6 Q&A pairs — each answer must be a complete, citation-ready sentence that LLMs can extract)
+- Conclusion with clear CTA
+
+## RULES
+- Clear structure with proper heading hierarchy
+- Comparison-friendly ("${brandName} vs ${competitors[0] || 'Competitor'}") 
+- Easy to scan — short paragraphs, bullets, bold key terms
+- Include semantic keywords naturally throughout
+- Use natural, authoritative language — not salesy
+- Every FAQ answer should be a standalone, factual sentence
+- Reference real competitor names from the data
+- Article should be 1200-1800 words
+- Format in clean Markdown
+
+## OUTPUT
+Full article in Markdown, ready to publish.`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: config.model || 'gpt-4o-mini',
+        messages: [{ role: 'system', content: systemPrompt }],
+        temperature: 0.6,
+        max_tokens: 3500,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      console.error('OpenAI error in /generate-article:', response.status, errBody);
+      return res.status(502).json({ error: 'AI service error.' });
+    }
+
+    const json = await response.json();
+    const content = json.choices?.[0]?.message?.content || '';
+
+    return res.json({ article: content });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'Request timed out. Article generation takes longer — please try again.' });
+    }
+    console.error('Article generator error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// ── Content Strategy Generator Endpoint ──
+app.post('/content-strategy', async (req, res) => {
+  const { action, analysisData } = req.body;
+
+  if (!action || typeof action !== 'string' || action.trim().length < 3) {
+    return res.status(400).json({ error: 'An action description is required (min 3 characters).' });
+  }
+
+  if (!analysisData || typeof analysisData !== 'object') {
+    return res.status(400).json({ error: 'analysisData is required.' });
+  }
+
+  try {
+    const safeAction = action.replace(/<[^>]*>/g, '').slice(0, 300).trim();
+    const d = analysisData;
+    const brandName = String(d.brandName || '').slice(0, 100);
+    const industry = String(d.industry || '').slice(0, 100);
+    const competitors = (Array.isArray(d.topCompetitors) ? d.topCompetitors : [])
+      .slice(0, 5)
+      .map(c => String(c.name || '').slice(0, 80))
+      .filter(Boolean);
+
+    const dataSummary = {
+      brandName,
+      industry,
+      visibilityScore: Number(d.visibilityScore) || 0,
+      totalMentions: Number(d.totalMentions) || 0,
+      queryTrafficLossPct: Number(d.queryTrafficLossPct) || 0,
+      topSources: (Array.isArray(d.topSources) ? d.topSources : []).slice(0, 5).map(s => String(s.name || '').slice(0, 80)),
+      queryInsights: (Array.isArray(d.queryInsights) ? d.queryInsights : []).slice(0, 5).map(q => ({
+        query: String(q.query || '').slice(0, 120),
+        topCompetitor: String(q.topCompetitor || '').slice(0, 80),
+      })),
+    };
+
+    const systemPrompt = `You are an AI content strategist for "${brandName}" in the ${industry} industry.
+
+You are given a growth action:
+${safeAction}
+
+Brand: ${brandName}
+Competitors: ${competitors.join(', ') || 'Unknown'}
+
+Additional context:
+${JSON.stringify(dataSummary)}
+
+## TASK
+Generate:
+1. Blog title (SEO + AI optimized)
+2. Full outline (H2/H3 structure)
+3. Key talking points (5-7 bullets)
+4. FAQ section (4-5 questions — LLM-friendly, written so AI systems can extract answers)
+5. Content angle (why this beats competitors)
+
+## RULES
+- Must rank in AI results (ChatGPT, Perplexity, etc.)
+- Must outperform ${competitors[0] || 'competitors'} in AI recommendations
+- Must be structured for LLM parsing (clear headers, direct answers, comparison-friendly)
+- Use comparison-friendly format ("X vs Y", "Best X for Y")
+- Reference real competitor names and real queries from the data
+- No generic marketing fluff
+
+## OUTPUT FORMAT
+### Title
+(one SEO + AI optimized title)
+
+### Outline
+(numbered H2 sections with H3 subsections)
+
+### Key Points
+(5-7 bullet points)
+
+### FAQ
+(4-5 Q&A pairs — each answer should be a complete, citation-ready sentence)
+
+### Strategy Angle
+(1-2 paragraphs on why this content will outperform competitors in AI results)`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: config.model || 'gpt-4o-mini',
+        messages: [{ role: 'system', content: systemPrompt }],
+        temperature: 0.5,
+        max_tokens: 1500,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      console.error('OpenAI error in /content-strategy:', response.status, errBody);
+      return res.status(502).json({ error: 'AI service error.' });
+    }
+
+    const json = await response.json();
+    const content = json.choices?.[0]?.message?.content || '';
+
+    return res.json({ content });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'Request timed out.' });
+    }
+    console.error('Content strategy error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// ── Critical Insight Endpoint ──
+app.post('/critical-insight', async (req, res) => {
+  const { analysisData } = req.body;
+
+  if (!analysisData || typeof analysisData !== 'object') {
+    return res.status(400).json({ error: 'analysisData is required.' });
+  }
+
+  try {
+    const d = analysisData;
+    const dataSummary = {
+      brandName: String(d.brandName || '').slice(0, 100),
+      industry: String(d.industry || '').slice(0, 100),
+      visibilityScore: Number(d.visibilityScore) || 0,
+      competitorPressureScore: Number(d.competitorPressureScore) || 0,
+      totalMentions: Number(d.totalMentions) || 0,
+      promptCount: Number(d.promptCount) || 0,
+      responseCount: Number(d.responseCount) || 0,
+      queryTrafficLossPct: Number(d.queryTrafficLossPct) || 0,
+      topCompetitors: (Array.isArray(d.topCompetitors) ? d.topCompetitors : []).slice(0, 5).map(c => ({
+        name: String(c.name || '').slice(0, 80),
+        mentionCount: Number(c.mentionCount) || 0,
+        appearanceRate: Number(c.appearanceRate) || 0,
+      })),
+      topSources: (Array.isArray(d.topSources) ? d.topSources : []).slice(0, 5).map(s => ({
+        name: String(s.name || '').slice(0, 80),
+        mentionCount: Number(s.mentionCount) || 0,
+      })),
+      queryInsights: (Array.isArray(d.queryInsights) ? d.queryInsights : []).slice(0, 5).map(q => ({
+        query: String(q.query || '').slice(0, 120),
+        brandMentions: Number(q.brandMentions) || 0,
+        topCompetitor: String(q.topCompetitor || '').slice(0, 80),
+        dominancePct: Number(q.dominancePct) || 0,
+      })),
+      summaryInsight: String(d.summaryInsight || '').slice(0, 300),
+    };
+
+    const systemPrompt = `You are an AI decision engine inside an AI Visibility platform.
+
+Your job is NOT to answer questions.
+Your job is to proactively detect the MOST IMPORTANT action.
+
+## INPUT
+${JSON.stringify(dataSummary)}
+
+## TASK
+Analyze the data and generate ONE highest priority recommendation.
+
+## OUTPUT FORMAT
+### 🚨 Critical Insight
+(1 sentence)
+
+### 🔥 What You Should Do
+(very clear action)
+
+### 📊 Why This Matters
+(business impact)
+
+### 📈 Expected Impact
+(percentage + timeframe)
+
+## RULES
+- Only ONE recommendation
+- Must be high impact
+- Must be actionable
+- No generic advice
+- Reference actual numbers from the data
+- Think like: "If the user does ONLY this, they win"`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: config.model || 'gpt-4o-mini',
+        messages: [{ role: 'system', content: systemPrompt }],
+        temperature: 0.3,
+        max_tokens: 600,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      console.error('OpenAI error in /critical-insight:', response.status, errBody);
+      return res.status(502).json({ error: 'AI service error.' });
+    }
+
+    const json = await response.json();
+    const content = json.choices?.[0]?.message?.content || '';
+
+    return res.json({ insight: content });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'Request timed out.' });
+    }
+    console.error('Critical insight error:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// ── Strategy Advisor Endpoint ──
+app.post('/strategy-advisor', async (req, res) => {
+  const { question, analysisData } = req.body;
+
+  if (!question || typeof question !== 'string' || question.trim().length < 3) {
+    return res.status(400).json({ error: 'A question is required (min 3 characters).' });
+  }
+
+  if (!analysisData || typeof analysisData !== 'object') {
+    return res.status(400).json({ error: 'Analysis data object is required.' });
+  }
+
+  // Sanitize question — strip HTML/scripts
+  const sanitizedQuestion = question
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<[^>]*>/g, '')
+    .trim()
+    .substring(0, 500);
+
+  // Build a compact data summary for the LLM (avoid sending raw massive objects)
+  const dataSummary = {
+    brandName: analysisData.brandName || 'Unknown',
+    industry: analysisData.industry || 'Unknown',
+    visibilityScore: analysisData.visibilityScore ?? analysisData.score ?? 0,
+    competitorPressureScore: analysisData.competitorPressureScore ?? 0,
+    totalMentions: analysisData.totalMentions ?? 0,
+    promptCount: analysisData.promptCount ?? 0,
+    responseCount: analysisData.responseCount ?? 0,
+    queryTrafficLossPct: analysisData.queryTrafficLossPct ?? 0,
+    topCompetitors: (analysisData.topCompetitors || []).slice(0, 5).map(c => ({
+      name: c.name,
+      mentionCount: c.mentionCount,
+      appearanceRate: c.appearanceRate,
+    })),
+    topSources: (analysisData.topSources || []).slice(0, 5).map(s => ({
+      name: s.name || s.source,
+      confidence: s.confidence,
+      mentionCount: s.mentionCount,
+    })),
+    queryInsights: (analysisData.queryInsights || []).slice(0, 5).map(q => ({
+      query: q.query,
+      topCompetitor: q.topCompetitor,
+      dominancePct: q.dominancePct,
+    })),
+    summaryInsight: analysisData.summaryInsight || '',
+  };
+
+  const systemPrompt = `You are an elite AI growth strategist and product intelligence engine.
+You are part of an AI Visibility SaaS platform.
+Your job is NOT to explain data. Your job is to generate actionable strategy.
+
+You are given structured analysis data about a brand's presence in AI-generated responses (LLMs like ChatGPT, Claude, etc.).
+
+RULES:
+- Be direct, no fluff
+- Use confident tone
+- No generic marketing advice
+- Always tie actions to data
+- Think like a $100k/year consultant
+- NEVER repeat raw data verbatim
+- NEVER explain obvious metrics
+- NEVER be vague
+
+OUTPUT FORMAT (use markdown):
+
+### 🚨 Core Problem
+(1-2 sentences, very sharp)
+
+### 📊 What's Happening
+- Bullet points from data
+- Include competitors if relevant
+
+### ⚠️ Why This Matters
+- Business impact
+- Visibility / traffic / revenue implications
+
+### 🔥 Recommended Strategy
+
+#### 1. Quick Wins (low effort, high impact)
+- Action 1
+- Action 2
+- Action 3
+
+#### 2. Strategic Moves (mid-long term)
+- Action 1
+- Action 2
+
+### 🧠 Competitive Insight
+- Why competitors are winning
+- What they are doing differently
+
+### 📈 Expected Impact
+- Visibility increase (%)
+- Traffic potential
+- Timeframe`;
+
+  const userMessage = `ANALYSIS DATA:
+${JSON.stringify(dataSummary, null, 2)}
+
+USER QUESTION:
+${sanitizedQuestion}`;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25000);
+
+  try {
+    console.log(`\n🧠 Strategy Advisor request: "${sanitizedQuestion.substring(0, 80)}..."`);
+
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.openai.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.openai.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userMessage },
+        ],
+        temperature: 0.4,
+        max_tokens: 1200,
+      }),
+      signal: controller.signal,
+    });
+
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      return res.status(502).json({ error: 'Failed to parse OpenAI response.' });
+    }
+
+    if (!response.ok) {
+      const apiErr = data?.error?.message || `OpenAI HTTP ${response.status}`;
+      console.error('❌ Strategy Advisor OpenAI error:', apiErr);
+      return res.status(502).json({ error: 'AI strategy generation failed. Please try again.' });
+    }
+
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content) {
+      return res.status(502).json({ error: 'Empty response from AI. Please try again.' });
+    }
+
+    console.log(`   ✅ Strategy response (${content.length} chars)`);
+    return res.json({ strategy: content });
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      console.error('❌ Strategy Advisor timeout');
+      return res.status(504).json({ error: 'Strategy generation timed out. Please try again.' });
+    }
+    console.error('❌ Strategy Advisor error:', error.message);
+    return res.status(500).json({ error: 'Internal error generating strategy.' });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  res.json({
+    status: 'OK',
+    service: 'ai-visibility-tool',
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
 });
+
+function buildKeepAliveUrl() {
+  if (process.env.KEEP_ALIVE_URL) {
+    return process.env.KEEP_ALIVE_URL;
+  }
+
+  if (process.env.RENDER_EXTERNAL_URL) {
+    return `${process.env.RENDER_EXTERNAL_URL}/health`;
+  }
+
+  return `http://localhost:${PORT}/health`;
+}
+
+async function pingKeepAlive(url) {
+  if (typeof fetch !== 'function') {
+    console.warn('⚠️ Keep-alive skipped: fetch is not available in this Node runtime.');
+    return;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(url, { method: 'GET', signal: controller.signal });
+    console.log(`💓 Keep-alive ping ${response.status} -> ${url}`);
+  } catch (error) {
+    const message = error.name === 'AbortError' ? 'ping_timeout' : error.message;
+    console.warn(`⚠️ Keep-alive ping failed: ${message}`);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function startKeepAlivePing() {
+  if (process.env.ENABLE_KEEP_ALIVE === 'false') {
+    console.log('💤 Keep-alive ping disabled via ENABLE_KEEP_ALIVE=false');
+    return;
+  }
+
+  const keepAliveUrl = buildKeepAliveUrl();
+  console.log(`💓 Keep-alive enabled every 5 minutes -> ${keepAliveUrl}`);
+
+  // Run one ping shortly after boot, then continue every interval.
+  setTimeout(() => {
+    pingKeepAlive(keepAliveUrl);
+  }, 15000);
+
+  setInterval(() => {
+    pingKeepAlive(keepAliveUrl);
+  }, KEEP_ALIVE_INTERVAL_MS);
+}
 
 // Start server
 app.listen(PORT, () => {
@@ -2118,4 +3233,5 @@ app.listen(PORT, () => {
   console.log(`📊 POST /analyze - Analyze brand visibility with real OpenAI calls`);
   console.log(`💓 GET /health - Health check`);
   console.log('\n⏳ Waiting for requests...\n');
+  startKeepAlivePing();
 });
